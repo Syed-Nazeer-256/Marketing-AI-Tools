@@ -277,7 +277,7 @@ def main():
                     if success:
                         import time
                         time.sleep(1.5)  # Give time to see the success animation
-                        st.experimental_rerun()
+                        st.rerun()
 
 # Run the app
 if __name__ == "__main__":
