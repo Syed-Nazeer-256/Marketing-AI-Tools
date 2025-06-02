@@ -266,14 +266,39 @@ if 'data_updated' not in st.session_state:
 # File path for CSV database
 CSV_FILE = "ai_tools_database.csv"
 
+# Define CSV columns
+CSV_COLUMNS = [
+    'Serial_Number', 'Name', 'Tool_Link', 'Category', 'Uploaded_By', 
+    'Date_Time', 'Purpose'
+]
+
 # Initialize CSV file if it doesn't exist
 def initialize_csv():
     if not os.path.exists(CSV_FILE):
-        df = pd.DataFrame(columns=[
-            'Serial_Number', 'Name', 'Category', 'Uploaded_By', 
-            'Date_Time', 'Purpose'
-        ])
+        df = pd.DataFrame(columns=CSV_COLUMNS)
         df.to_csv(CSV_FILE, index=False)
+    else:
+        # Ensure existing CSV has the Tool_Link column
+        try:
+            df_existing = pd.read_csv(CSV_FILE)
+            if 'Tool_Link' not in df_existing.columns:
+                # Find index of 'Name' column
+                if 'Name' in df_existing.columns:
+                    name_idx = df_existing.columns.get_loc('Name')
+                    df_existing.insert(name_idx + 1, 'Tool_Link', pd.NA) # Or use '' for empty string
+                    df_existing.to_csv(CSV_FILE, index=False)
+                else: # If 'Name' isn't there, just append, though this is less ideal
+                    df_existing['Tool_Link'] = pd.NA
+                    df_existing.to_csv(CSV_FILE, index=False)
+
+
+        except pd.errors.EmptyDataError:
+            # If file is empty, re-initialize with correct columns
+            df = pd.DataFrame(columns=CSV_COLUMNS)
+            df.to_csv(CSV_FILE, index=False)
+        except Exception as e:
+            st.warning(f"Could not update existing CSV with Tool_Link column: {e}")
+
 
 # Load data from CSV
 @st.cache_data
@@ -282,21 +307,31 @@ def load_data():
     try:
         df = pd.read_csv(CSV_FILE)
         if df.empty:
-            return df
+            return pd.DataFrame(columns=CSV_COLUMNS) # Ensure empty df has all columns
         # Ensure proper data types
         df['Date_Time'] = pd.to_datetime(df['Date_Time'], errors='coerce')
+        # Fill NaN in Tool_Link with empty strings if you prefer for display
+        if 'Tool_Link' in df.columns:
+            df['Tool_Link'] = df['Tool_Link'].fillna('')
+        else: # If somehow Tool_Link is still missing after init
+            df['Tool_Link'] = ''
         return df.sort_values('Date_Time', ascending=False)
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
-        return pd.DataFrame(columns=[
-            'Serial_Number', 'Name', 'Category', 'Uploaded_By', 
-            'Date_Time', 'Purpose'
-        ])
+        return pd.DataFrame(columns=CSV_COLUMNS)
 
 # Save data to CSV
 def save_data(df):
     try:
-        df.to_csv(CSV_FILE, index=False)
+        # Ensure all columns are present before saving, matching CSV_COLUMNS order
+        df_to_save = pd.DataFrame(columns=CSV_COLUMNS)
+        for col in CSV_COLUMNS:
+            if col in df.columns:
+                df_to_save[col] = df[col]
+            else:
+                df_to_save[col] = pd.NA # Or appropriate default
+        
+        df_to_save.to_csv(CSV_FILE, index=False)
         st.session_state.data_updated = True
         return True
     except Exception as e:
@@ -304,12 +339,16 @@ def save_data(df):
         return False
 
 # Validate form inputs
-def validate_inputs(name, category, uploaded_by, purpose):
+def validate_inputs(name, tool_link, category, uploaded_by, purpose):
     errors = []
     
     if not name or len(name.strip()) < 2:
         errors.append("Tool name must be at least 2 characters long")
     
+    # Tool link is optional, but if provided, check basic format
+    if tool_link and not (tool_link.strip().startswith("http://") or tool_link.strip().startswith("https://")):
+        errors.append("Tool link, if provided, must be a valid URL (e.g., http://example.com)")
+        
     if not category or category == "Select Category":
         errors.append("Please select a valid category")
     
@@ -322,19 +361,20 @@ def validate_inputs(name, category, uploaded_by, purpose):
     return errors
 
 # Add new entry
-def add_entry(name, category, uploaded_by, purpose):
+def add_entry(name, tool_link, category, uploaded_by, purpose):
     df = load_data()
     
     # Generate new serial number
-    if df.empty:
+    if df.empty or df['Serial_Number'].isna().all(): # Check if 'Serial_Number' column is all NaN
         serial_num = 1
     else:
-        serial_num = df['Serial_Number'].max() + 1 if not df['Serial_Number'].isna().all() else 1
+        serial_num = df['Serial_Number'].max() + 1
     
     # Create new entry
     new_entry = {
         'Serial_Number': serial_num,
         'Name': name.strip(),
+        'Tool_Link': tool_link.strip() if tool_link else '', # Add tool link
         'Category': category,
         'Uploaded_By': uploaded_by.strip(),
         'Date_Time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -342,8 +382,10 @@ def add_entry(name, category, uploaded_by, purpose):
     }
     
     # Add to dataframe
-    new_df = pd.concat([pd.DataFrame([new_entry]), df], ignore_index=True)
-    
+    new_df_row = pd.DataFrame([new_entry])
+    # Ensure columns match, especially if df was empty and didn't have all columns from CSV_COLUMNS
+    new_df = pd.concat([new_df_row, df], ignore_index=True).reindex(columns=CSV_COLUMNS)
+
     if save_data(new_df):
         st.cache_data.clear()  # Clear cache to refresh data
         return True
@@ -395,18 +437,18 @@ with st.sidebar:
     st.markdown("---")
     
     # Load current data for sidebar stats
-    df = load_data()
+    df_sidebar = load_data() # Use a different variable name to avoid conflict if needed
     
-    if not df.empty:
+    if not df_sidebar.empty:
         st.markdown("### 📊 Quick Stats")
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("Total Tools", len(df))
+            st.metric("Total Tools", len(df_sidebar))
         with col2:
-            st.metric("Categories", df['Category'].nunique() if 'Category' in df.columns else 0)
+            st.metric("Categories", df_sidebar['Category'].nunique() if 'Category' in df_sidebar.columns else 0)
         
         # Download button
-        csv_data = df.to_csv(index=False)
+        csv_data = df_sidebar.to_csv(index=False)
         st.download_button(
             label="📥 Download Dataset",
             data=csv_data,
@@ -429,13 +471,12 @@ if page == "🏠 Dashboard":
     """, unsafe_allow_html=True)
     
     # Load data
-    df = load_data()
+    df_dashboard = load_data()
     
-    if df.empty:
+    if df_dashboard.empty:
         # Empty state with Lottie animation
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            # Load empty state animation
             lottie_empty = load_lottie_url("https://assets1.lottiefiles.com/packages/lf20_VgJfK5.json")
             if lottie_empty:
                 display_lottie(lottie_empty, 400)
@@ -453,13 +494,13 @@ if page == "🏠 Dashboard":
         with col1:
             st.markdown(f"""
             <div class="metric-card">
-                <div class="metric-number">{len(df)}</div>
+                <div class="metric-number">{len(df_dashboard)}</div>
                 <div class="metric-label">Total AI Tools</div>
             </div>
             """, unsafe_allow_html=True)
         
         with col2:
-            categories_count = df['Category'].nunique() if 'Category' in df.columns else 0
+            categories_count = df_dashboard['Category'].nunique() if 'Category' in df_dashboard.columns else 0
             st.markdown(f"""
             <div class="metric-card">
                 <div class="metric-number">{categories_count}</div>
@@ -468,7 +509,7 @@ if page == "🏠 Dashboard":
             """, unsafe_allow_html=True)
         
         with col3:
-            recent_uploads = len(df[df['Date_Time'] >= (datetime.datetime.now() - datetime.timedelta(days=7))]) if 'Date_Time' in df.columns else 0
+            recent_uploads = len(df_dashboard[df_dashboard['Date_Time'] >= (datetime.datetime.now() - datetime.timedelta(days=7))]) if 'Date_Time' in df_dashboard.columns else 0
             st.markdown(f"""
             <div class="metric-card">
                 <div class="metric-number">{recent_uploads}</div>
@@ -477,7 +518,7 @@ if page == "🏠 Dashboard":
             """, unsafe_allow_html=True)
         
         with col4:
-            contributors = df['Uploaded_By'].nunique() if 'Uploaded_By' in df.columns else 0
+            contributors = df_dashboard['Uploaded_By'].nunique() if 'Uploaded_By' in df_dashboard.columns else 0
             st.markdown(f"""
             <div class="metric-card">
                 <div class="metric-number">{contributors}</div>
@@ -494,8 +535,8 @@ if page == "🏠 Dashboard":
             st.markdown('<div class="chart-container">', unsafe_allow_html=True)
             st.subheader("📊 Tools by Category")
             
-            if 'Category' in df.columns:
-                category_counts = df['Category'].value_counts()
+            if 'Category' in df_dashboard.columns:
+                category_counts = df_dashboard['Category'].value_counts()
                 fig_pie = px.pie(
                     values=category_counts.values,
                     names=category_counts.index,
@@ -517,8 +558,8 @@ if page == "🏠 Dashboard":
             st.markdown('<div class="chart-container">', unsafe_allow_html=True)
             st.subheader("📈 Tools Added Over Time")
             
-            if 'Date_Time' in df.columns:
-                df_time = df.copy()
+            if 'Date_Time' in df_dashboard.columns:
+                df_time = df_dashboard.copy()
                 df_time['Date'] = pd.to_datetime(df_time['Date_Time']).dt.date
                 daily_counts = df_time.groupby('Date').size().reset_index(name='Count')
                 daily_counts['Cumulative'] = daily_counts['Count'].cumsum()
@@ -546,9 +587,8 @@ if page == "🏠 Dashboard":
         st.markdown('<div class="chart-container">', unsafe_allow_html=True)
         st.subheader("🕒 Recent Activity")
         
-        recent_df = df.head(10).copy()
+        recent_df = df_dashboard.head(10).copy()
         if not recent_df.empty:
-            # Format the display dataframe
             if 'Date_Time' in recent_df.columns:
                 recent_df['Date_Time'] = pd.to_datetime(recent_df['Date_Time']).dt.strftime('%Y-%m-%d %H:%M')
             
@@ -556,19 +596,31 @@ if page == "🏠 Dashboard":
             display_df = recent_df.rename(columns={
                 'Serial_Number': 'S.No.',
                 'Name': 'Tool Name',
+                'Tool_Link': 'Link', # Renaming for display
                 'Category': 'Category',
                 'Uploaded_By': 'Added By',
                 'Date_Time': 'Date & Time',
                 'Purpose': 'Purpose/Usage'
             })
             
+            # Select and order columns for display
+            display_cols = ['S.No.', 'Tool Name', 'Link', 'Category', 'Added By', 'Date & Time', 'Purpose/Usage']
+            # Filter out any columns that might not exist if df was malformed (defensive)
+            display_cols_present = [col for col in display_cols if col in display_df.columns]
+
             st.dataframe(
-                display_df,
+                display_df[display_cols_present],
                 use_container_width=True,
                 hide_index=True,
                 column_config={
                     "S.No.": st.column_config.NumberColumn("S.No.", width="small"),
                     "Tool Name": st.column_config.TextColumn("Tool Name", width="medium"),
+                    "Link": st.column_config.LinkColumn( # Make the link clickable
+                        "Link", 
+                        help="Direct link to the tool",
+                        display_text="Visit Tool 🔗",
+                        width="medium"
+                    ),
                     "Category": st.column_config.TextColumn("Category", width="medium"),
                     "Added By": st.column_config.TextColumn("Added By", width="medium"),
                     "Date & Time": st.column_config.TextColumn("Date & Time", width="medium"),
@@ -582,7 +634,6 @@ if page == "🏠 Dashboard":
 elif page == "➕ Add Tools":
     st.markdown('<div class="page-container">', unsafe_allow_html=True)
     
-    # Page Header
     col1, col2 = st.columns([2, 1])
     
     with col1:
@@ -594,12 +645,10 @@ elif page == "➕ Add Tools":
         """, unsafe_allow_html=True)
     
     with col2:
-        # Load add tool animation
         lottie_add = load_lottie_url("https://assets2.lottiefiles.com/packages/lf20_DMgKk1.json")
         if lottie_add:
             display_lottie(lottie_add, 200)
     
-    # Form Section
     col1, col2 = st.columns([2, 1])
     
     with col1:
@@ -608,62 +657,68 @@ elif page == "➕ Add Tools":
         with st.form("add_tool_form", clear_on_submit=True):
             st.markdown("### 🛠️ Tool Information")
             
-            # Tool Name
             st.markdown("**Tool Name** 🏷️")
             name = st.text_input(
-                "",
+                "tool_name_label", # Unique key for label
                 placeholder="e.g., ChatGPT, Claude, Midjourney",
-                key="tool_name",
+                key="tool_name_input", # Unique key for input widget
+                label_visibility="collapsed",
                 help="Enter the name of the AI tool"
             )
             
-            # Category
+            st.markdown("**Tool Link (Optional)** 🔗") # New Field Label
+            tool_link = st.text_input(
+                "tool_link_label", # Unique key for label
+                placeholder="e.g., https://chat.openai.com",
+                key="tool_link_input", # Unique key for input widget
+                label_visibility="collapsed",
+                help="Enter the direct link to the AI tool's website (optional)"
+            )
+            
             st.markdown("**Category** 📂")
             category = st.selectbox(
-                "",
+                "category_label", # Unique key for label
                 ["Select Category", "Content Creation", "Image Generation", "Data Analysis", 
                  "Social Media Management", "Email Marketing", "SEO Tools", "Video Editing", 
-                 "Voice/Audio", "Translation", "Chatbots", "Design Tools", "Analytics", "Other"],
-                key="category",
+                 "Voice/Audio", "Translation", "Chatbots", "Design Tools", "Analytics", "PPT Creation","Others"],
+                key="category_input", # Unique key for input widget
+                label_visibility="collapsed",
                 help="Select the primary function category of this AI tool"
             )
             
-            # Uploaded By
             st.markdown("**Your Name** 👤")
             uploaded_by = st.text_input(
-                "",
+                "uploader_label", # Unique key for label
                 placeholder="Enter your name",
-                key="uploader",
+                key="uploader_input", # Unique key for input widget
+                label_visibility="collapsed",
                 help="Enter the name of the team member adding this tool"
             )
             
-            # Purpose
             st.markdown("**Purpose & Usage** 📝")
             purpose = st.text_area(
-                "",
+                "purpose_label", # Unique key for label
                 placeholder="Describe how this tool helps with marketing tasks, its key features, and specific use cases...",
-                key="purpose",
+                key="purpose_input", # Unique key for input widget
                 height=120,
+                label_visibility="collapsed",
                 help="Provide a detailed description of how this tool is used in marketing activities"
             )
             
-            # Submit button
             col1_btn, col2_btn, col3_btn = st.columns([1, 2, 1])
             with col2_btn:
                 submitted = st.form_submit_button("🚀 Add Tool to Database", use_container_width=True)
             
             if submitted:
-                # Validate inputs
-                errors = validate_inputs(name, category, uploaded_by, purpose)
+                errors = validate_inputs(name, tool_link, category, uploaded_by, purpose) # Pass tool_link
                 
                 if errors:
                     for error in errors:
                         st.error(f"❌ {error}")
                 else:
-                    # Add entry with loading animation
                     with st.spinner("Adding new tool to database..."):
-                        time.sleep(1)  # Brief pause for UX
-                        if add_entry(name, category, uploaded_by, purpose):
+                        time.sleep(1)
+                        if add_entry(name, tool_link, category, uploaded_by, purpose): # Pass tool_link
                             st.success("🎉 Tool added successfully!")
                             st.balloons()
                             time.sleep(2)
@@ -674,12 +729,12 @@ elif page == "➕ Add Tools":
         st.markdown('</div>', unsafe_allow_html=True)
     
     with col2:
-        # Tips and Guidelines
         st.markdown("""
         <div class="form-container" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white;">
             <h3>💡 Tips for Adding Tools</h3>
             <ul style="list-style: none; padding: 0;">
                 <li style="margin-bottom: 1rem;">🎯 <strong>Be Specific:</strong> Include the exact tool name</li>
+                <li style="margin-bottom: 1rem;">🔗 <strong>Add Link:</strong> Provide a direct URL to the tool if available</li>
                 <li style="margin-bottom: 1rem;">📂 <strong>Choose Category:</strong> Select the most relevant category</li>
                 <li style="margin-bottom: 1rem;">📝 <strong>Detailed Purpose:</strong> Explain how it helps marketing</li>
                 <li style="margin-bottom: 1rem;">✨ <strong>Use Cases:</strong> Include specific examples</li>
@@ -687,19 +742,18 @@ elif page == "➕ Add Tools":
         </div>
         """, unsafe_allow_html=True)
         
-        # Recent additions preview
-        df = load_data()
-        if not df.empty:
+        df_add_tools_page = load_data() # Use a different variable name
+        if not df_add_tools_page.empty:
             st.markdown("""
             <div class="form-container">
                 <h3>📋 Recent Additions</h3>
             </div>
             """, unsafe_allow_html=True)
             
-            recent_tools = df.head(3)[['Name', 'Category', 'Uploaded_By']].rename(columns={
+            recent_tools = df_add_tools_page.head(3)[['Name', 'Tool_Link', 'Category']].rename(columns={
                 'Name': 'Tool',
-                'Category': 'Type',
-                'Uploaded_By': 'By'
+                'Tool_Link': 'Link',
+                'Category': 'Type'
             })
             
             st.dataframe(recent_tools, use_container_width=True, hide_index=True)
@@ -712,6 +766,6 @@ st.markdown("""
 <div style="text-align: center; color: #666; padding: 2rem; background: linear-gradient(135deg, #f8f9ff 0%, #ffffff 100%); border-radius: 15px; margin-top: 2rem;">
     <h4 style="color: #667eea; margin-bottom: 1rem;">🤖 AI Tools Dashboard</h4>
     <p style="margin-bottom: 0.5rem;">Empowering Marketing Teams with AI Innovation</p>
-    <p style="font-size: 0.9rem; opacity: 0.7;">Made with ❤️ using Streamlit | Version 2.0</p>
+    <p style="font-size: 0.9rem; opacity: 0.7;">Made with ❤️ using Streamlit | Version 2.1 (with Tool Links)</p>
 </div>
 """, unsafe_allow_html=True)
